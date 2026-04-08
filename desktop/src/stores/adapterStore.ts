@@ -7,9 +7,16 @@ const CODE_LENGTH = 6
 const CODE_TTL_MS = 60 * 60 * 1000 // 60 minutes
 
 function generateCode(): string {
-  const array = new Uint8Array(CODE_LENGTH)
-  crypto.getRandomValues(array)
-  return Array.from(array, (b) => SAFE_ALPHABET[b % SAFE_ALPHABET.length]).join('')
+  const maxValid = Math.floor(256 / SAFE_ALPHABET.length) * SAFE_ALPHABET.length
+  let code = ''
+  while (code.length < CODE_LENGTH) {
+    const array = new Uint8Array(1)
+    crypto.getRandomValues(array)
+    if (array[0]! < maxValid) {
+      code += SAFE_ALPHABET[array[0]! % SAFE_ALPHABET.length]
+    }
+  }
+  return code
 }
 
 type AdapterStore = {
