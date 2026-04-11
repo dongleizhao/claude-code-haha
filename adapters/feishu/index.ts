@@ -782,6 +782,14 @@ async function handleServerMessage(chatId: string, msg: ServerMessage): Promise<
         await card.ensureCreated().catch((err) => {
           console.error('[Feishu] ensureCreated on content_start failed:', err)
         })
+      } else if (msg.blockType === 'tool_use') {
+        // 把工具调用起点登记到已存在的卡 —— 让用户看到 "⚙️ 运行中..." 指示。
+        // 只读 map，不 getOrCreate: /clear 这类无回复命令不应该因为上游发了
+        // 孤立的 tool_use 事件而被迫建一张空卡。
+        const card = streamingCards.get(chatId)
+        if (card) {
+          card.startTool(msg.toolUseId, msg.toolName)
+        }
       }
       // 注意: tool_use 不 finalize 当前卡。让整个 turn 的所有文本输出
       // 合并到同一张卡里 —— 更接近 Desktop UI 的一体化答复体验，也避免
@@ -813,13 +821,25 @@ async function handleServerMessage(chatId: string, msg: ServerMessage): Promise<
       break
     }
 
-    case 'thinking':
-      // 推理文本（reasoning），当前版本不单独渲染，等以后加 collapsible panel
+    case 'thinking': {
+      // 推理文本（reasoning）—— 作为卡片顶部的 blockquote 预览持续更新，
+      // 让用户在工具执行期间也能看到模型的思考过程（对齐 Telegram 的行为）。
+      // 同样不 auto-create: 没有预建卡的命令路径不应该被 thinking 事件撑出一张空卡。
+      const card = streamingCards.get(chatId)
+      if (card && typeof msg.text === 'string' && msg.text) {
+        card.appendReasoning(msg.text)
+      }
       break
+    }
 
-    case 'tool_use_complete':
-      // Tool details are noise for IM users; visible in Desktop if needed.
+    case 'tool_use_complete': {
+      // 把对应 tool step 从 "⚙️ running" 切到 "✅ done"，让用户看到进度推进。
+      const card = streamingCards.get(chatId)
+      if (card) {
+        card.completeTool(msg.toolUseId, msg.toolName)
+      }
       break
+    }
 
     case 'tool_result':
       // Tool errors are handled internally by the AI (retries etc.)

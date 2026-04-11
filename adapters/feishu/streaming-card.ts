@@ -110,6 +110,15 @@ export function buildErrorCard(message: string): Record<string, unknown> {
   }
 }
 
+/** 从末尾截取最多 maxLen 个字符；超过时前缀 "..." 保留最新 maxLen-3 个字。
+ *
+ *  思考内容往往是"先分析 → 得出结论"的线性过程，截取末尾比截取开头更有用 —— 用户
+ *  最关心的是"模型现在在想什么"，不是"五千个 token 前在想什么"。 */
+function truncateReasoningPreview(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text
+  return '...' + text.slice(text.length - maxLen + 3)
+}
+
 // ---------------------------------------------------------------------------
 // State machine
 // ---------------------------------------------------------------------------
@@ -128,6 +137,22 @@ export type StreamingCardDeps = {
   replyToMessageId?: string
 }
 
+/** One entry in the tool-use trace displayed above the answer text. */
+type ToolStep = {
+  /** Prefer toolUseId for dedup; fall back to a synthetic id when missing. */
+  id: string
+  name: string
+  status: 'running' | 'done'
+}
+
+/** 最多保留的 reasoning 预览字符数，超过则取末尾 + 省略号前缀。 */
+const REASONING_PREVIEW_CHARS = 600
+
+/** 连续 streamCardContent 失败多少次后才放弃 CardKit 流式。
+ *  设成 3 而不是 1，是为了避免单次抖动（网络、临时校验失败等）把整张卡片
+ *  冻结到 finalize —— 用户看到的就是 "long wait → 一次性 dump"。 */
+const STREAM_FAIL_DISABLE_THRESHOLD = 3
+
 export class StreamingCard {
   // ---- lifecycle state ----
   private phase: StreamingCardPhase = 'idle'
@@ -139,13 +164,19 @@ export class StreamingCard {
   private messageId: string | null = null
   /** CardKit cardElement.content() 单调递增序列号。 */
   private sequence = 0
-  /** CardKit 流式还在工作。230099 之后置为 false，中间帧将跳过，
-   *  最终 finalize 仍会尝试 settings+update（cardId 仍然有效）。 */
+  /** CardKit 流式还在工作。230099 或连续 N 次未知错误之后置为 false，
+   *  中间帧将跳过，最终 finalize 仍会尝试 settings+update（cardId 仍然有效）。 */
   private cardKitStreamActive = false
+  /** 连续 streamCardContent 未知错误计数。一次成功就清零。 */
+  private consecutiveStreamFailures = 0
 
   // ---- text state ----
   private accumulatedText = ''
   private lastFlushedText = ''
+  /** 累积 thinking_delta，渲染为卡片顶部的推理预览 blockquote。 */
+  private accumulatedReasoningText = ''
+  /** 工具调用轨迹：按 startTool 调用顺序排列，completeTool 改其 status。 */
+  private toolSteps: ToolStep[] = []
 
   // ---- flush ----
   private flushController: FlushController
@@ -219,8 +250,10 @@ export class StreamingCard {
       }
     }
 
-    // 卡片可写之后若已有 buffered 文本，立刻触发一次 flush
-    if (this.accumulatedText.length > 0) {
+    // 卡片可写之后若已有 buffered 内容（text / reasoning / tools），
+    // 立刻触发一次 flush —— 否则 content_start{tool_use} 或 thinking 在
+    // ensureCreated 期间到达的状态会一直卡在节流 gate 上，用户看不到。
+    if (this.hasAnyContent()) {
       void this.flushController.throttledUpdate(this.currentThrottle())
     }
   }
@@ -231,6 +264,55 @@ export class StreamingCard {
     if (this.phase === 'completed' || this.phase === 'aborted') return
     this.accumulatedText += delta
     void this.flushController.throttledUpdate(this.currentThrottle())
+  }
+
+  /** 追加 reasoning/thinking delta —— 与 appendText 并列，渲染为顶部预览。 */
+  appendReasoning(delta: string): void {
+    if (!delta) return
+    if (this.phase === 'completed' || this.phase === 'aborted') return
+    this.accumulatedReasoningText += delta
+    void this.flushController.throttledUpdate(this.currentThrottle())
+  }
+
+  /** 记录一次 tool_use 开始。dedupe 按 toolUseId（缺省时按 name+index）。 */
+  startTool(toolUseId: string | undefined, toolName: string | undefined): void {
+    if (this.phase === 'completed' || this.phase === 'aborted') return
+    if (!toolName) return
+    const id = toolUseId || `${toolName}#${this.toolSteps.length}`
+    if (this.toolSteps.some((s) => s.id === id)) return
+    this.toolSteps.push({ id, name: toolName, status: 'running' })
+    void this.flushController.throttledUpdate(this.currentThrottle())
+  }
+
+  /** 把指定 tool 的状态从 running 切到 done。先按 id 匹配，再 fallback name。 */
+  completeTool(toolUseId: string | undefined, toolName: string | undefined): void {
+    if (this.phase === 'completed' || this.phase === 'aborted') return
+    let step: ToolStep | undefined
+    if (toolUseId) {
+      step = this.toolSteps.find((s) => s.id === toolUseId)
+    }
+    if (!step && toolName) {
+      for (let i = this.toolSteps.length - 1; i >= 0; i--) {
+        const s = this.toolSteps[i]!
+        if (s.name === toolName && s.status === 'running') {
+          step = s
+          break
+        }
+      }
+    }
+    if (!step) return
+    if (step.status === 'done') return
+    step.status = 'done'
+    void this.flushController.throttledUpdate(this.currentThrottle())
+  }
+
+  /** 是否已有任何可渲染内容（文本 / 推理 / 工具）。 */
+  private hasAnyContent(): boolean {
+    return (
+      this.accumulatedText.length > 0 ||
+      this.accumulatedReasoningText.length > 0 ||
+      this.toolSteps.length > 0
+    )
   }
 
   /**
@@ -252,7 +334,7 @@ export class StreamingCard {
     this.flushController.cancelPendingFlush()
     await this.flushController.waitForFlush()
 
-    const finalText = this.renderedText()
+    const finalText = this.terminalText()
     try {
       if (this.cardId) {
         // CardKit 路径: settings(false) + card.update（即使中间 stream 曾失败）
@@ -348,11 +430,68 @@ export class StreamingCard {
     return this.cardKitStreamActive ? THROTTLE.CARDKIT_MS : THROTTLE.PATCH_MS
   }
 
-  /** 把 accumulatedText 经 sanitize + optimize 管道出来。 */
+  /** 组合 reasoning + toolSteps + answerText，经 sanitize + optimize 管道出来。
+   *
+   *  顺序为 tools → reasoning → answer，以分隔符隔开：
+   *  - tools 永远在最顶部，方便用户先看到 "现在在跑什么"
+   *  - reasoning 居中（thinking 文本）
+   *  - answer 在底部
+   *
+   *  整张卡片只用最朴素的 markdown：plain text + emoji + bold + line break。
+   *  **不使用** blockquote / list / heading —— 这些会被
+   *  optimizeMarkdownForFeishu 触发额外的 <br> 注入和 H 降级，并且历史上
+   *  曾导致飞书 CardKit 校验报错（"long wait → 一次性 dump" 退化的根因）。
+   *  任意 section 为空则忽略；全部为空时返回等待提示。 */
   private renderedText(): string {
+    const sections: string[] = []
+
+    if (this.toolSteps.length > 0) {
+      // 单行 inline 形式: ⚙️ Bash · ✅ Read · ⚙️ Glob ...
+      // 用中点分隔，比 markdown list 更不容易触发 Feishu 排版异常
+      const inline = this.toolSteps
+        .map((s) => `${s.status === 'done' ? '✅' : '⚙️'} ${s.name}`)
+        .join(' · ')
+      sections.push(`🛠️ ${inline}`)
+    }
+
+    if (this.accumulatedReasoningText) {
+      const preview = truncateReasoningPreview(
+        this.accumulatedReasoningText,
+        REASONING_PREVIEW_CHARS,
+      )
+      // openclaw 风格: 一行 header + 空行 + 原文。不引用 / 不缩进，让飞书
+      // markdown 元素按普通段落渲染。
+      sections.push(`💭 **思考中**\n\n${preview}`)
+    }
+
+    if (this.accumulatedText) {
+      sections.push(this.accumulatedText)
+    }
+
+    if (sections.length === 0) return '☁️ *正在思考中...*'
+
+    // 用一行分隔符把 sections 分开，比单纯空行更稳定
+    const composed = sections.join('\n\n---\n\n')
+
     // 表格数限制在 optimize 之前做 —— sanitize 对原始 markdown 最准
-    const limited = sanitizeTextForCard(this.accumulatedText)
+    const limited = sanitizeTextForCard(composed)
     return optimizeMarkdownForFeishu(limited, 2)
+  }
+
+  /** 终态文本: 只渲染最终答复正文，丢弃 reasoning 和 toolSteps。
+   *
+   *  推理过程和工具调用是"过程态"信息，已经在流式中展示给用户看过；
+   *  message_complete 之后用户应该看到一张干净的答复卡（与 Desktop UI 对齐）。
+   *  这个方法专供 finalize 调用，不要在中间帧用。
+   *
+   *  边界情况: 如果完全没有 accumulatedText（比如纯 thinking 没产出答案
+   *  这种异常 case），退回到 renderedText() 至少把推理留下来当兜底。 */
+  private terminalText(): string {
+    if (this.accumulatedText) {
+      const limited = sanitizeTextForCard(this.accumulatedText)
+      return optimizeMarkdownForFeishu(limited, 2)
+    }
+    return this.renderedText()
   }
 
   /** FlushController 调用的 doFlush。 */
@@ -379,6 +518,7 @@ export class StreamingCard {
           this.sequence,
         )
         this.lastFlushedText = finalText
+        this.consecutiveStreamFailures = 0
       } catch (err) {
         if (isCardRateLimitError(err)) {
           // 跳帧 —— 下次 throttledUpdate 会重试
@@ -392,12 +532,26 @@ export class StreamingCard {
           this.cardKitStreamActive = false
           return
         }
-        // 其他错误 —— 禁用流式，最坏情况等 finalize 兜底
-        console.error(
-          '[Feishu StreamingCard] stream flush failed:',
-          err instanceof Error ? err.message : err,
-        )
-        this.cardKitStreamActive = false
+        // 其他错误 —— 跳帧重试，避免单次失败把整张卡冻在最初状态。
+        // 只有连续失败超过阈值才认定 CardKit 不可用并降级 —— 否则
+        // 用户会看到 "long wait → 完事后一次性把所有内容刷出来" 的体验
+        // 退化（这是 streamCardContent 一旦报错就 disable 流式造成的）。
+        this.consecutiveStreamFailures += 1
+        const errMsg = err instanceof Error ? err.message : String(err)
+        if (this.consecutiveStreamFailures === 1) {
+          // 首帧失败先记录一次，避免日志风暴
+          console.warn(
+            '[Feishu StreamingCard] stream flush failed (will retry):',
+            errMsg,
+          )
+        }
+        if (this.consecutiveStreamFailures >= STREAM_FAIL_DISABLE_THRESHOLD) {
+          console.error(
+            `[Feishu StreamingCard] stream flush failed ${this.consecutiveStreamFailures}× consecutively, disabling CardKit streaming until finalize:`,
+            errMsg,
+          )
+          this.cardKitStreamActive = false
+        }
         return
       }
     } else {
@@ -450,6 +604,16 @@ export class StreamingCard {
   /** @internal */
   _getAccumulatedText(): string {
     return this.accumulatedText
+  }
+
+  /** @internal */
+  _getAccumulatedReasoning(): string {
+    return this.accumulatedReasoningText
+  }
+
+  /** @internal */
+  _getToolSteps(): ReadonlyArray<ToolStep> {
+    return this.toolSteps
   }
 
   /** @internal */
