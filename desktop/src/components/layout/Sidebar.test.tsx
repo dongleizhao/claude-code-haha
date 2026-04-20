@@ -179,4 +179,17 @@ describe('Sidebar', () => {
     expect(screen.getByPlaceholderText('Search sessions')).toBeInTheDocument()
     expect(screen.getByRole('complementary')).toHaveAttribute('data-state', 'open')
   })
+
+  it('keeps the project filter section overflow visible for dropdown menus', () => {
+    render(<Sidebar />)
+
+    expect(screen.getByTestId('sidebar-project-filter-section')).toHaveStyle({ overflow: 'visible' })
+    expect(screen.getByTestId('sidebar-project-filter-section')).toHaveClass('relative', 'z-20')
+  })
+
+  it('keeps the session list section in a constrained flex column for scrolling', () => {
+    render(<Sidebar />)
+
+    expect(screen.getByTestId('sidebar-session-list-section')).toHaveClass('flex', 'flex-1', 'min-h-0', 'flex-col')
+  })
 })

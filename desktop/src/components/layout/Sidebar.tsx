@@ -198,7 +198,11 @@ export function Sidebar() {
 
       {sidebarOpen ? (
         <>
-          <div className="sidebar-section sidebar-section--visible flex-none px-3 pb-1">
+          <div
+            data-testid="sidebar-project-filter-section"
+            className="sidebar-section sidebar-section--visible relative z-20 flex-none px-3 pb-1"
+            style={{ overflow: 'visible' }}
+          >
             <div className="flex items-center justify-between">
               <ProjectFilter />
             </div>
@@ -215,8 +219,11 @@ export function Sidebar() {
             />
           </div>
 
-          <div className="sidebar-section sidebar-section--visible flex-1 min-h-0">
-            <div className="flex-1 overflow-y-auto px-3">
+          <div
+            data-testid="sidebar-session-list-section"
+            className="sidebar-section sidebar-section--visible flex flex-1 min-h-0 flex-col"
+          >
+            <div className="min-h-0 flex-1 overflow-y-auto px-3">
               {error && (
                 <div className="mx-1 mt-2 rounded-[var(--radius-md)] border border-[var(--color-error)]/20 bg-[var(--color-error)]/5 px-3 py-2">
                   <div className="text-xs font-medium text-[var(--color-error)]">{t('sidebar.sessionListFailed')}</div>
