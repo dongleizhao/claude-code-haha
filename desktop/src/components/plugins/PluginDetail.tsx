@@ -42,6 +42,15 @@ export function PluginDetail() {
   const activeSession = sessions.find((session) => session.id === activeSessionId)
   const currentWorkDir = activeSession?.workDir || undefined
 
+  const otherCapabilityItems = useMemo(
+    () =>
+      CAPABILITY_ORDER.map((key) => ({
+        key,
+        items: selectedPlugin?.capabilities[key] ?? [],
+      })),
+    [selectedPlugin],
+  )
+
   if (isDetailLoading) {
     return (
       <div className="flex justify-center py-12">
@@ -54,14 +63,6 @@ export function PluginDetail() {
 
   const canMutate = selectedPlugin.scope !== 'managed' && selectedPlugin.scope !== 'builtin'
   const canNavigateSharedCapabilities = selectedPlugin.enabled
-  const otherCapabilityItems = useMemo(
-    () =>
-      CAPABILITY_ORDER.map((key) => ({
-        key,
-        items: selectedPlugin.capabilities[key],
-      })),
-    [selectedPlugin],
-  )
 
   const runAction = async (key: string, fn: () => Promise<string>) => {
     setActionKey(key)
