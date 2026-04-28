@@ -66,6 +66,7 @@ describe('provider presets API', () => {
     expect(zhipu?.defaultModels.haiku).toBe('glm-4.5-air')
     expect(zhipu?.defaultModels.sonnet).toBe('glm-5-turbo')
     expect(zhipu?.defaultModels.opus).toBe('glm-5.1')
+    expect(kimi?.baseUrl).toBe('https://api.kimi.com/coding')
     expect(kimi?.defaultModels.main).toBe('kimi-k2.6')
     expect(minimax?.defaultModels.main).toBe('MiniMax-M2.7')
   })

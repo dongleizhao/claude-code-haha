@@ -44,7 +44,7 @@
   {
     "id": "kimi",
     "name": "Kimi",
-    "baseUrl": "https://api.moonshot.cn/anthropic",
+    "baseUrl": "https://api.kimi.com/coding",
     "apiFormat": "anthropic",
     "defaultModels": {
       "main": "kimi-k2.6",
